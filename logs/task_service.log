@@ -1,0 +1,14 @@
+INFO:__main__:Base de datos inicializada correctamente
+INFO:__main__:Iniciando servicio de gestión de tareas...
+ * Serving Flask app 'app'
+ * Debug mode: on
+INFO:werkzeug:[31m[1mWARNING: This is a development server. Do not use it in a production deployment. Use a production WSGI server instead.[0m
+ * Running on all addresses (0.0.0.0)
+ * Running on http://127.0.0.1:5003
+ * Running on http://172.21.175.48:5003
+INFO:werkzeug:[33mPress CTRL+C to quit[0m
+INFO:werkzeug: * Restarting with stat
+INFO:__main__:Base de datos inicializada correctamente
+INFO:__main__:Iniciando servicio de gestión de tareas...
+WARNING:werkzeug: * Debugger is active!
+INFO:werkzeug: * Debugger PIN: 110-078-879
