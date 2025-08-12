@@ -1,7 +1,39 @@
-venv/ 
-__pycache__/ 
-*.pyc 
-*.pyo 
-*.pyd 
-*.sqlite3 
-.env 
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.Python
+env/
+venv/
+*.log
+logs/
+*.pid
+*.backup
+database.db
+tasks_database.db
+
+# Node/Angular
+node_modules/
+dist/
+*.log
+
+# Binarios y archivos grandes
+*.deb
+*.zip
+*.tar.gz
+force_cleanup.sh
+mongodb-compass_1.43.0_amd64.deb
+
+# Sistema y editores
+.DS_Store
+.vscode/
+.idea/
+
+# Archivos de entorno
+*.env
+
+# Archivos desconocidos
+To
+package.json
+package-lock.json

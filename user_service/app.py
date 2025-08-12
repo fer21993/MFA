@@ -1,33 +1,60 @@
 import sys
 import os
+import traceback
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
 
-from flask import Flask, jsonify, request
+from flask import Flask, jsonify, request, g
 from flask_cors import CORS
 import requests
 import jwt
-import sqlite3
 import datetime
 import re
 from werkzeug.security import generate_password_hash, check_password_hash
 from functools import wraps
 from shared_db.db import get_db_connection, init_db
+import time
 
-#! Creamos una instancia de la aplicación Flask
 app = Flask(__name__)
 CORS(app, origins=['http://localhost:4200'])
-# El token debe llevar el id del usuario y el username
 SECRET_KEY = "a8f3c9d2f021ae6b8b76935b8e7f89ad28d76f9d29e3a1cf21e8b2c91566f51a"
 
+@app.before_request
+def start_timer():
+    g.start_time = time.time()
+
+@app.after_request
+def log_request(response):
+    try:
+        collection = get_db_connection(collection_name='logs')
+        duration = (time.time() - g.start_time) * 1000
+        user = None
+        if 'Authorization' in request.headers:
+            token = request.headers['Authorization'].replace('Bearer ', '')
+            try:
+                payload = jwt.decode(token, SECRET_KEY, algorithms=['HS256'])
+                user = payload.get('username')
+            except:
+                pass
+        log_entry = {
+            'timestamp': datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%d %H:%M:%S"),
+            'method': request.method,
+            'endpoint': request.path,
+            'status_code': response.status_code,
+            'response_time_ms': round(duration, 2),
+            'user': user or 'anonymous',
+            'client_ip': request.remote_addr
+        }
+        collection.insert_one(log_entry)
+    except Exception as e:
+        print(f"Error logging request: {str(e)}")
+        traceback.print_exc()
+    return response
+
 def validate_username(username: str) -> bool:
-    """Valida longitud y caracteres del nombre de usuario."""
     return bool(username and 3 <= len(username) <= 50 and re.match(r'^[a-zA-Z0-9_]+$', username))
 
 def validate_password(password: str) -> bool:
-    """Valida que la contraseña tenga al menos 8 caracteres."""
     return bool(password and len(password) >= 8)
-
-# ===================== DECORADOR JWT =====================
 
 def token_required(f):
     @wraps(f)
@@ -47,44 +74,30 @@ def token_required(f):
         return f(*args, **kwargs)
     return decorated
 
-# ===================== Ruta para obtener todos los usuarios =====================
-
 @app.route('/users', methods=['GET'])
 @token_required
 def list_users():
-    """Lista todos los usuarios."""
     try:
-        conn = get_db_connection()
-        cursor = conn.cursor()
-        cursor.execute("SELECT id, username, status FROM users")
-        users = cursor.fetchall()
-        conn.close()
+        collection = get_db_connection()
+        users = collection.find({}, {'_id': 1, 'username': 1, 'status': 1})
         
         return jsonify({
             "status": "success",
             "users": [{
-                "id": user["id"],
+                "id": user["_id"],
                 "username": user["username"],
                 "status": user["status"]
             } for user in users]
         }), 200
-    except sqlite3.Error as e:
-        return jsonify({"message": f"Error en la base de datos: {str(e)}", "status": "error"}), 500
-    
-    
-
-# ===================== Ruta para obtener usuario por id =====================
+    except Exception as e:
+        return jsonify({"message": f"Error: {str(e)}", "status": "error"}), 500
 
 @app.route('/users/<int:user_id>', methods=['GET'])
 @token_required
 def get_user(user_id):
-    """Obtiene información de un usuario por ID."""
     try:
-        conn = get_db_connection()
-        cursor = conn.cursor()
-        cursor.execute("SELECT id, username, status FROM users WHERE id = ?", (user_id,))
-        user = cursor.fetchone()
-        conn.close()
+        collection = get_db_connection()
+        user = collection.find_one({"_id": user_id}, {'_id': 1, 'username': 1, 'status': 1})
         
         if not user:
             return jsonify({"message": "Usuario no encontrado", "status": "error"}), 404
@@ -92,65 +105,45 @@ def get_user(user_id):
         return jsonify({
             "status": "success",
             "user": {
-                "id": user["id"],
+                "id": user["_id"],
                 "username": user["username"],
                 "status": user["status"]
             }
         }), 200
-    except sqlite3.Error as e:
-        return jsonify({"message": f"Error en la base de datos: {str(e)}", "status": "error"}), 500
-
-# ===================== Ruta para deshabilitar usuarios =====================
+    except Exception as e:
+        return jsonify({"message": f"Error: {str(e)}", "status": "error"}), 500
 
 @app.route('/users/<int:user_id>/disable', methods=['PUT'])
 @token_required
 def disable_user(user_id):
-    """Deshabilita un usuario."""
     try:
-        conn = get_db_connection()
-        cursor = conn.cursor()
-        cursor.execute("UPDATE users SET status = 0 WHERE id = ?", (user_id,))
-        conn.commit()
+        collection = get_db_connection()
+        result = collection.update_one({"_id": user_id}, {"$set": {"status": 0}})
         
-        if cursor.rowcount == 0:
-            conn.close()
+        if result.matched_count == 0:
             return jsonify({"message": "Usuario no encontrado", "status": "error"}), 404
         
-        conn.close()
         return jsonify({"message": "Usuario deshabilitado correctamente", "status": "success"}), 200
-    except sqlite3.Error as e:
-        return jsonify({"message": f"Error en la base de datos: {str(e)}", "status": "error"}), 500
-    
-
-# ===================== Ruta para habilitar usuarios =====================
+    except Exception as e:
+        return jsonify({"message": f"Error: {str(e)}", "status": "error"}), 500
 
 @app.route('/users/<int:user_id>/enable', methods=['PUT'])
 @token_required
 def enable_user(user_id):
-    """Habilita un usuario."""
     try:
-        conn = get_db_connection()
-        cursor = conn.cursor()
-        cursor.execute("UPDATE users SET status = 1 WHERE id = ?", (user_id,))
-        conn.commit()
+        collection = get_db_connection()
+        result = collection.update_one({"_id": user_id}, {"$set": {"status": 1}})
         
-        if cursor.rowcount == 0:
-            conn.close()
+        if result.matched_count == 0:
             return jsonify({"message": "Usuario no encontrado", "status": "error"}), 404
         
-        conn.close()
         return jsonify({"message": "Usuario habilitado correctamente", "status": "success"}), 200
-    except sqlite3.Error as e:
-        return jsonify({"message": f"Error en la base de datos: {str(e)}", "status": "error"}), 500
-
-
-
-# ===================== Ruta para editar usuarios =====================
+    except Exception as e:
+        return jsonify({"message": f"Error: {str(e)}", "status": "error"}), 500
 
 @app.route('/users/<int:user_id>', methods=['PUT'])
 @token_required
 def edit_user(user_id):
-    """Edita información de un usuario."""
     data = request.get_json()
     
     required_fields = ['username', 'password']
@@ -160,41 +153,31 @@ def edit_user(user_id):
     username = data['username']
     password = data['password']
     
-    # Validaciones
     if not validate_username(username):
         return jsonify({"message": "Nombre de usuario inválido (3-50 caracteres, solo letras, números y guiones bajos)", "status": "error"}), 400
     if not validate_password(password):
         return jsonify({"message": "La contraseña debe tener al menos 8 caracteres", "status": "error"}), 400
     
     try:
-        conn = get_db_connection()
-        cursor = conn.cursor()
+        collection = get_db_connection()
         
-        # Verificar si el username ya existe para otro usuario
-        cursor.execute("SELECT 1 FROM users WHERE username = ? AND id != ?", (username, user_id))
-        if cursor.fetchone():
-            conn.close()
+        if collection.find_one({"username": username, "_id": {"$ne": user_id}}):
             return jsonify({"message": "Nombre de usuario ya registrado", "status": "error"}), 400
         
-        # Hash de la contraseña
         hashed_password = generate_password_hash(password)
         
-        cursor.execute(
-            """UPDATE users SET username = ?, password = ? WHERE id = ?""",
-            (username, hashed_password, user_id)
+        result = collection.update_one(
+            {"_id": user_id},
+            {"$set": {"username": username, "password": hashed_password}}
         )
-        conn.commit()
         
-        if cursor.rowcount == 0:
-            conn.close()
+        if result.matched_count == 0:
             return jsonify({"message": "Usuario no encontrado", "status": "error"}), 404
         
-        conn.close()
         return jsonify({"message": "Usuario editado correctamente", "status": "success"}), 200
-    except sqlite3.Error as e:
-        return jsonify({"message": f"Error en la base de datos: {str(e)}", "status": "error"}), 500
+    except Exception as e:
+        return jsonify({"message": f"Error: {str(e)}", "status": "error"}), 500
 
-# Iniciamos el servidor en el puerto 5002 en modo debug
 if __name__ == '__main__':
     init_db()
     app.run(port=5002, debug=True)
