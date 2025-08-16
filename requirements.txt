@@ -11,3 +11,10 @@ PyJWT==2.10.1
 requests==2.32.4
 urllib3==2.5.0
 Werkzeug==3.1.3
+flask
+flask-cors
+pymongo
+pyotp
+qrcode[pil]
+werkzeug
+pyjwt

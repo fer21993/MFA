@@ -2,33 +2,75 @@ import sys
 import os
 import datetime
 import logging
-from flask import Flask, jsonify, request
+from flask import Flask, jsonify, request, g
 from flask_cors import CORS
 import requests
-import sqlite3
-from functools import wraps
 import jwt
+from functools import wraps
+import pymongo
+from pymongo import ReturnDocument, DESCENDING
+import traceback
+import time
 
-# Configuración de la aplicación Flask
 app = Flask(__name__)
 CORS(app, origins=['http://localhost:4200'])
 
-# Configuración de logging
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-# Configuración de seguridad - Usar la misma clave que el servicio de autenticación
 JWT_SECRET_KEY = "a8f3c9d2f021ae6b8b76935b8e7f89ad28d76f9d29e3a1cf21e8b2c91566f51a"
 
+MONGO_URI = "mongodb+srv://2022371103:Minyoon93@cluster0.cbdtd0g.mongodb.net/?retryWrites=true&w=majority&appName=Cluster0"
+client = pymongo.MongoClient(MONGO_URI)
+db = client['shared_db']
+
+@app.before_request
+def start_timer():
+    g.start_time = time.time()
+
+@app.after_request
+def log_request(response):
+    try:
+        collection = db['logs']
+        duration = (time.time() - g.start_time) * 1000
+        user = None
+        if 'Authorization' in request.headers:
+            token = request.headers['Authorization'].replace('Bearer ', '')
+            try:
+                payload = jwt.decode(token, JWT_SECRET_KEY, algorithms=['HS256'])
+                user = payload.get('username')
+            except:
+                pass
+        log_entry = {
+            'timestamp': datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%d %H:%M:%S"),
+            'method': request.method,
+            'endpoint': request.path,
+            'status_code': response.status_code,
+            'response_time_ms': round(duration, 2),
+            'user': user or 'anonymous',
+            'client_ip': request.remote_addr
+        }
+        collection.insert_one(log_entry)
+    except Exception as e:
+        print(f"Error logging request: {str(e)}")
+        traceback.print_exc()
+    return response
+
+def get_next_sequence(name: str) -> int:
+    counters = db['counters']
+    ret = counters.find_one_and_update(
+        {'_id': name},
+        {'$inc': {'seq': 1}},
+        upsert=True,
+        return_document=ReturnDocument.AFTER
+    )
+    return ret['seq']
+
 class TaskService:
-    """Clase principal para manejar las operaciones de tareas"""
-    
     def __init__(self):
-        self.db_name = "tasks_database.db"
         self.setup_database()
     
     def validate_date_format(self, date_string):
-        """Valida que la fecha tenga el formato correcto YYYY-MM-DD"""
         try:
             datetime.datetime.strptime(date_string, '%Y-%m-%d')
             return True
@@ -37,72 +79,38 @@ class TaskService:
             return False
     
     def create_db_connection(self):
-        """Establece conexión con la base de datos SQLite"""
-        try:
-            db_path = os.path.join(os.path.dirname(__file__), self.db_name)
-            connection = sqlite3.connect(db_path)
-            connection.row_factory = sqlite3.Row
-            return connection
-        except sqlite3.Error as e:
-            logger.error(f"Error al conectar con la base de datos: {e}")
-            raise e
+        return db['tasks']
     
     def setup_database(self):
-        """Inicializa la base de datos y crea las tablas necesarias"""
         try:
-            db_path = os.path.join(os.path.dirname(__file__), self.db_name)
-            connection = sqlite3.connect(db_path)
-            cursor = connection.cursor()
+            collection = self.create_db_connection()
+            collection.create_index('creator_id')
+            sample_tasks = [
+                {'task_name': 'Implementar API REST', 'task_description': 'Desarrollo de endpoints para el microservicio', 
+                 'creation_date': '2024-01-15', 'deadline_date': '2024-02-15', 'current_status': 'en_progreso', 'active_flag': 1, 'creator_id': 1001,
+                 'last_modified': datetime.datetime.utcnow()},
+                {'task_name': 'Configurar Base de Datos', 'task_description': 'Setup inicial de SQLite y tablas', 
+                 'creation_date': '2024-01-10', 'deadline_date': '2024-01-20', 'current_status': 'completado', 'active_flag': 1, 'creator_id': 1002,
+                 'last_modified': datetime.datetime.utcnow()},
+                {'task_name': 'Testing y Validación', 'task_description': 'Pruebas unitarias y de integración', 
+                 'creation_date': '2024-02-01', 'deadline_date': '2024-02-28', 'current_status': 'pendiente', 'active_flag': 1, 'creator_id': 1001,
+                 'last_modified': datetime.datetime.utcnow()}
+            ]
             
-            # Crear tabla de tareas con estructura mejorada
-            cursor.execute("""
-                CREATE TABLE IF NOT EXISTS project_tasks (
-                    task_id INTEGER PRIMARY KEY AUTOINCREMENT,
-                    task_name TEXT NOT NULL,
-                    task_description TEXT NOT NULL,
-                    creation_date DATE NOT NULL,
-                    deadline_date DATE NOT NULL,
-                    current_status TEXT NOT NULL,
-                    active_flag INTEGER NOT NULL DEFAULT 1,
-                    creator_id INTEGER NOT NULL,
-                    last_modified TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-                )
-            """)
+            for task in sample_tasks:
+                if not collection.find_one({'task_name': task['task_name'], 'creator_id': task['creator_id']}):
+                    task['_id'] = get_next_sequence('tasks')
+                    collection.insert_one(task)
             
-            # Insertar datos de ejemplo solo si la tabla está vacía
-            cursor.execute("SELECT COUNT(*) FROM project_tasks")
-            if cursor.fetchone()[0] == 0:
-                sample_tasks = [
-                    ('Implementar API REST', 'Desarrollo de endpoints para el microservicio', 
-                     '2024-01-15', '2024-02-15', 'en_progreso', 1, 1001),
-                    ('Configurar Base de Datos', 'Setup inicial de SQLite y tablas', 
-                     '2024-01-10', '2024-01-20', 'completado', 1, 1002),
-                    ('Testing y Validación', 'Pruebas unitarias y de integración', 
-                     '2024-02-01', '2024-02-28', 'pendiente', 1, 1001)
-                ]
-                
-                for task_data in sample_tasks:
-                    cursor.execute(
-                        """INSERT INTO project_tasks 
-                           (task_name, task_description, creation_date, deadline_date, 
-                            current_status, active_flag, creator_id)
-                           VALUES (?, ?, ?, ?, ?, ?, ?)""",
-                        task_data
-                    )
-            
-            connection.commit()
-            connection.close()
             logger.info("Base de datos inicializada correctamente")
             
-        except sqlite3.Error as e:
+        except Exception as e:
             logger.error(f"Error al inicializar la base de datos: {e}")
             raise e
 
-# Instancia global del servicio
 task_service = TaskService()
 
 def require_jwt_token(function):
-    """Decorador para validar tokens JWT en las rutas protegidas"""
     @wraps(function)
     def decorated_function(*args, **kwargs):
         auth_header = request.headers.get('Authorization')
@@ -117,13 +125,11 @@ def require_jwt_token(function):
             }), 401
         
         try:
-            # Extraer token del header
             if auth_header.startswith("Bearer "):
                 token = auth_header.split(" ")[1]
             else:
                 token = auth_header
             
-            # Decodificar y validar token
             payload = jwt.decode(token, JWT_SECRET_KEY, algorithms=["HS256"])
             request.current_user = payload
             
@@ -150,26 +156,18 @@ def require_jwt_token(function):
 @app.route('/api/tasks', methods=['GET'])
 @require_jwt_token
 def get_all_tasks():
-    """Endpoint para obtener todas las tareas activas"""
     try:
-        connection = task_service.create_db_connection()
-        cursor = connection.cursor()
+        collection = task_service.create_db_connection()
         
-        cursor.execute("""
-            SELECT task_id, task_name, task_description, creation_date, 
-                   deadline_date, current_status, active_flag, creator_id, last_modified
-            FROM project_tasks 
-            WHERE active_flag = 1
-            ORDER BY creation_date DESC
-        """)
-        
-        tasks_data = cursor.fetchall()
-        connection.close()
+        tasks_data = collection.find(
+            {"active_flag": 1},
+            sort=[('creation_date', DESCENDING)]
+        )
         
         tasks_list = []
         for task in tasks_data:
             tasks_list.append({
-                "id": task["task_id"],
+                "id": task["_id"],
                 "name": task["task_name"],
                 "description": task["task_description"],
                 "created_at": task["creation_date"],
@@ -177,7 +175,7 @@ def get_all_tasks():
                 "status": task["current_status"],
                 "is_active": bool(task["active_flag"]),
                 "created_by": task["creator_id"],
-                "last_modified": task["last_modified"]
+                "last_modified": task["last_modified"].isoformat() if 'last_modified' in task else None
             })
         
         return jsonify({
@@ -189,8 +187,8 @@ def get_all_tasks():
             }
         })
         
-    except sqlite3.Error as db_error:
-        logger.error(f"Error de base de datos: {db_error}")
+    except Exception as e:
+        logger.error(f"Error: {e}")
         return jsonify({
             "statusCode": 500,
             "intData": {
@@ -202,20 +200,10 @@ def get_all_tasks():
 @app.route('/api/tasks/<int:task_id>', methods=['GET'])
 @require_jwt_token
 def get_task_by_id(task_id):
-    """Endpoint para obtener una tarea específica por ID"""
     try:
-        connection = task_service.create_db_connection()
-        cursor = connection.cursor()
+        collection = task_service.create_db_connection()
         
-        cursor.execute("""
-            SELECT task_id, task_name, task_description, creation_date, 
-                   deadline_date, current_status, active_flag, creator_id, last_modified
-            FROM project_tasks 
-            WHERE task_id = ? AND active_flag = 1
-        """, (task_id,))
-        
-        task_data = cursor.fetchone()
-        connection.close()
+        task_data = collection.find_one({"_id": task_id, "active_flag": 1})
         
         if not task_data:
             return jsonify({
@@ -227,7 +215,7 @@ def get_task_by_id(task_id):
             }), 404
         
         task_info = {
-            "id": task_data["task_id"],
+            "id": task_data["_id"],
             "name": task_data["task_name"],
             "description": task_data["task_description"],
             "created_at": task_data["creation_date"],
@@ -235,7 +223,7 @@ def get_task_by_id(task_id):
             "status": task_data["current_status"],
             "is_active": bool(task_data["active_flag"]),
             "created_by": task_data["creator_id"],
-            "last_modified": task_data["last_modified"]
+            "last_modified": task_data["last_modified"].isoformat() if 'last_modified' in task_data else None
         }
         
         return jsonify({
@@ -246,8 +234,8 @@ def get_task_by_id(task_id):
             }
         })
         
-    except sqlite3.Error as db_error:
-        logger.error(f"Error de base de datos: {db_error}")
+    except Exception as e:
+        logger.error(f"Error: {e}")
         return jsonify({
             "statusCode": 500,
             "intData": {
@@ -259,11 +247,9 @@ def get_task_by_id(task_id):
 @app.route('/api/tasks/create', methods=['POST'])
 @require_jwt_token
 def create_new_task():
-    """Endpoint para crear una nueva tarea"""
     try:
         request_data = request.get_json()
         
-        # Validar campos requeridos
         required_fields = ['name', 'description', 'creation_date', 'deadline', 'status', 'creator_id']
         missing_fields = [field for field in required_fields if field not in request_data]
         
@@ -276,7 +262,6 @@ def create_new_task():
                 }
             }), 400
         
-        # Validar formato de fechas
         if not task_service.validate_date_format(request_data['creation_date']):
             return jsonify({
                 "statusCode": 400,
@@ -295,26 +280,22 @@ def create_new_task():
                 }
             }), 400
         
-        # Insertar nueva tarea
-        connection = task_service.create_db_connection()
-        cursor = connection.cursor()
+        collection = task_service.create_db_connection()
         
-        cursor.execute("""
-            INSERT INTO project_tasks 
-            (task_name, task_description, creation_date, deadline_date, current_status, creator_id)
-            VALUES (?, ?, ?, ?, ?, ?)
-        """, (
-            request_data['name'],
-            request_data['description'],
-            request_data['creation_date'],
-            request_data['deadline'],
-            request_data['status'],
-            request_data['creator_id']
-        ))
+        doc = {
+            "_id": get_next_sequence('tasks'),
+            "task_name": request_data['name'],
+            "task_description": request_data['description'],
+            "creation_date": request_data['creation_date'],
+            "deadline_date": request_data['deadline'],
+            "current_status": request_data['status'],
+            "active_flag": 1,
+            "creator_id": request_data['creator_id'],
+            "last_modified": datetime.datetime.utcnow()
+        }
+        collection.insert_one(doc)
         
-        new_task_id = cursor.lastrowid
-        connection.commit()
-        connection.close()
+        new_task_id = doc['_id']
         
         return jsonify({
             "statusCode": 201,
@@ -324,8 +305,8 @@ def create_new_task():
             }
         })
         
-    except sqlite3.Error as db_error:
-        logger.error(f"Error al crear tarea: {db_error}")
+    except Exception as e:
+        logger.error(f"Error al crear tarea: {e}")
         return jsonify({
             "statusCode": 500,
             "intData": {
@@ -337,17 +318,12 @@ def create_new_task():
 @app.route('/api/tasks/<int:task_id>/update', methods=['PUT'])
 @require_jwt_token
 def update_existing_task(task_id):
-    """Endpoint para actualizar una tarea existente"""
     try:
         request_data = request.get_json()
         
-        # Validar que la tarea existe
-        connection = task_service.create_db_connection()
-        cursor = connection.cursor()
+        collection = task_service.create_db_connection()
         
-        cursor.execute("SELECT task_id FROM project_tasks WHERE task_id = ? AND active_flag = 1", (task_id,))
-        if not cursor.fetchone():
-            connection.close()
+        if not collection.find_one({"_id": task_id, "active_flag": 1}):
             return jsonify({
                 "statusCode": 404,
                 "intData": {
@@ -356,10 +332,7 @@ def update_existing_task(task_id):
                 }
             }), 404
         
-        # Construir query de actualización dinámicamente
-        update_fields = []
-        update_values = []
-        
+        update_dict = {}
         field_mappings = {
             'name': 'task_name',
             'description': 'task_description',
@@ -373,7 +346,6 @@ def update_existing_task(task_id):
             if field in request_data:
                 if field in ['creation_date', 'deadline']:
                     if not task_service.validate_date_format(request_data[field]):
-                        connection.close()
                         return jsonify({
                             "statusCode": 400,
                             "intData": {
@@ -381,12 +353,9 @@ def update_existing_task(task_id):
                                 "data": None
                             }
                         }), 400
-                
-                update_fields.append(f"{db_field} = ?")
-                update_values.append(request_data[field])
+                update_dict[db_field] = request_data[field]
         
-        if not update_fields:
-            connection.close()
+        if not update_dict:
             return jsonify({
                 "statusCode": 400,
                 "intData": {
@@ -395,15 +364,9 @@ def update_existing_task(task_id):
                 }
             }), 400
         
-        # Agregar timestamp de modificación
-        update_fields.append("last_modified = CURRENT_TIMESTAMP")
-        update_values.append(task_id)
+        update_dict["last_modified"] = datetime.datetime.utcnow()
         
-        update_query = f"UPDATE project_tasks SET {', '.join(update_fields)} WHERE task_id = ?"
-        cursor.execute(update_query, update_values)
-        
-        connection.commit()
-        connection.close()
+        result = collection.update_one({"_id": task_id}, {"$set": update_dict})
         
         return jsonify({
             "statusCode": 200,
@@ -413,8 +376,8 @@ def update_existing_task(task_id):
             }
         })
         
-    except sqlite3.Error as db_error:
-        logger.error(f"Error al actualizar tarea: {db_error}")
+    except Exception as e:
+        logger.error(f"Error al actualizar tarea: {e}")
         return jsonify({
             "statusCode": 500,
             "intData": {
@@ -426,19 +389,15 @@ def update_existing_task(task_id):
 @app.route('/api/tasks/<int:task_id>/deactivate', methods=['PUT'])
 @require_jwt_token
 def deactivate_task(task_id):
-    """Endpoint para desactivar una tarea"""
     try:
-        connection = task_service.create_db_connection()
-        cursor = connection.cursor()
+        collection = task_service.create_db_connection()
         
-        cursor.execute("""
-            UPDATE project_tasks 
-            SET active_flag = 0, last_modified = CURRENT_TIMESTAMP 
-            WHERE task_id = ? AND active_flag = 1
-        """, (task_id,))
+        result = collection.update_one(
+            {"_id": task_id, "active_flag": 1},
+            {"$set": {"active_flag": 0, "last_modified": datetime.datetime.utcnow()}}
+        )
         
-        if cursor.rowcount == 0:
-            connection.close()
+        if result.matched_count == 0:
             return jsonify({
                 "statusCode": 404,
                 "intData": {
@@ -446,9 +405,6 @@ def deactivate_task(task_id):
                     "data": None
                 }
             }), 404
-        
-        connection.commit()
-        connection.close()
         
         return jsonify({
             "statusCode": 200,
@@ -458,8 +414,8 @@ def deactivate_task(task_id):
             }
         })
         
-    except sqlite3.Error as db_error:
-        logger.error(f"Error al desactivar tarea: {db_error}")
+    except Exception as e:
+        logger.error(f"Error al desactivar tarea: {e}")
         return jsonify({
             "statusCode": 500,
             "intData": {
@@ -471,19 +427,15 @@ def deactivate_task(task_id):
 @app.route('/api/tasks/<int:task_id>/activate', methods=['PUT'])
 @require_jwt_token
 def activate_task(task_id):
-    """Endpoint para activar una tarea"""
     try:
-        connection = task_service.create_db_connection()
-        cursor = connection.cursor()
+        collection = task_service.create_db_connection()
         
-        cursor.execute("""
-            UPDATE project_tasks 
-            SET active_flag = 1, last_modified = CURRENT_TIMESTAMP 
-            WHERE task_id = ?
-        """, (task_id,))
+        result = collection.update_one(
+            {"_id": task_id},
+            {"$set": {"active_flag": 1, "last_modified": datetime.datetime.utcnow()}}
+        )
         
-        if cursor.rowcount == 0:
-            connection.close()
+        if result.matched_count == 0:
             return jsonify({
                 "statusCode": 404,
                 "intData": {
@@ -491,9 +443,6 @@ def activate_task(task_id):
                     "data": None
                 }
             }), 404
-        
-        connection.commit()
-        connection.close()
         
         return jsonify({
             "statusCode": 200,
@@ -503,8 +452,8 @@ def activate_task(task_id):
             }
         })
         
-    except sqlite3.Error as db_error:
-        logger.error(f"Error al activar tarea: {db_error}")
+    except Exception as e:
+        logger.error(f"Error al activar tarea: {e}")
         return jsonify({
             "statusCode": 500,
             "intData": {
@@ -515,7 +464,6 @@ def activate_task(task_id):
 
 @app.route('/health', methods=['GET'])
 def health_check():
-    """Endpoint para verificar el estado del servicio"""
     return jsonify({
         "statusCode": 200,
         "intData": {

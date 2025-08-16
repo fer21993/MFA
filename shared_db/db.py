@@ -1,42 +1,60 @@
-import sqlite3
+import pymongo
 import os
 from werkzeug.security import generate_password_hash
+from pymongo.errors import DuplicateKeyError
+from pymongo import ReturnDocument
 
-def get_db_connection() -> sqlite3.Connection:
-    """Creates a connection to the shared database with row_factory."""
-    base_dir = os.path.abspath(os.path.join(os.path.dirname(__file__), '..'))
-    db_path = os.path.join(base_dir, 'shared_db', 'database.db')
-    conn = sqlite3.connect(db_path)
-    conn.row_factory = sqlite3.Row
-    return conn
+# MongoDB connection string
+MONGO_URI = "mongodb+srv://2022371103:Minyoon93@cluster0.cbdtd0g.mongodb.net/?retryWrites=true&w=majority&appName=Cluster0"
+
+# Database name
+DB_NAME = "shared_db"
+
+# Global client connection
+client = pymongo.MongoClient(MONGO_URI)
+db = client[DB_NAME]
+
+def get_db_connection(collection_name='users') -> pymongo.collection.Collection:
+    """Returns the MongoDB collection for the specified collection_name."""
+    return db[collection_name]
+
+def get_next_sequence(name: str) -> int:
+    """Gets the next sequence value for auto-increment IDs."""
+    counters = db['counters']
+    ret = counters.find_one_and_update(
+        {'_id': name},
+        {'$inc': {'seq': 1}},
+        upsert=True,
+        return_document=ReturnDocument.AFTER
+    )
+    return ret['seq']
 
 def init_db():
-    """Initializes the shared database schema only if needed."""
-    base_dir = os.path.abspath(os.path.join(os.path.dirname(__file__), '..'))
-    db_path = os.path.join(base_dir, 'shared_db', 'database.db')
-    conn = sqlite3.connect(db_path)
-    cursor = conn.cursor()
-    cursor.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='users'")
-    if not cursor.fetchone():
-        cursor.execute("""
-            CREATE TABLE users (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                username TEXT NOT NULL,
-                password TEXT NOT NULL,
-                status INTEGER DEFAULT 1
-            )
-        """)
-        users = [
-            ('username1', 'Hola.123', 1),
-            ('username2', 'Hola.123', 1),
-            ('username3', 'Hola.123', 1),
-            ('username4', 'Hola.123', 1)
-        ]
-        for user in users:
-            username, password, status = user
-            cursor.execute(
-                "INSERT OR IGNORE INTO users (username, password, status) VALUES (?, ?, ?)",
-                (username, generate_password_hash(password), status)
-            )
-    conn.commit()
-    conn.close()
+    collection = get_db_connection(collection_name='users')
+    
+    # Ensure unique index on 'username'
+    if 'username_1' not in collection.index_information():
+        collection.create_index('username', unique=True)
+    
+    # Initial users to insert (if they don't exist based on username)
+    users = [
+        ('username1', 'Hola.123', 1),
+        ('username2', 'Hola.123', 1),
+        ('username3', 'Hola.123', 1),
+        ('username4', 'Hola.123', 1)
+    ]
+    
+    for user in users:
+        username, password, status = user
+        if collection.find_one({'username': username}):
+            continue
+        hashed_password = generate_password_hash(password)
+        doc = {
+            '_id': get_next_sequence('users'),
+            'username': username,
+            'password': hashed_password,
+            'email': None,
+            'status': status,
+            'totp_secret': None
+        }
+        collection.insert_one(doc)
